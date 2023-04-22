@@ -1,15 +1,3 @@
-/**
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
- * NONINFRINGEMENT.  IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
- * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
- * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
- *
- */
-
 #include <WiFiNINA.h>
 #include "crc16.h"
 
@@ -84,6 +72,8 @@ The protocol:
 
 
 //#define DEBUG       1    // Uncomment to enable debug
+//#define DEBUG_SEND  1    // Uncomment to send to debug device in Domoticz
+
 #define BUFFER_LEN  1000 // Message buffer length in bytes
 #define CRC_LEN     4    // Checksum length in bytes
 
@@ -100,7 +90,8 @@ enum Field
   ENERGY_DELIVERED = 0, // 1.8.0 (kWh)
   ENERGY_RETURNED,      // 2.8.0 (kWh)
   POWER_DELIVERED,      // 1.7.0 (kW)
-  POWER_RETURNED        // 2.7.0 (kW)
+  POWER_RETURNED,       // 2.7.0 (kW)
+  POWER_DEBUG
 };
 
 enum State currentState; // Keeps track of current state
@@ -115,8 +106,8 @@ int numberOfCrcBytesRead = 0; // Count number of checksum bytes received
 
 // WiFi
 WiFiClient client;
-char ssid[] = "my-ssid";        // Your network SSID (name)
-char pass[] = "wifi-password";      // Your network password (use for WPA, or use as key for WEP)
+char ssid[] = "my-ssid";             // Your network SSID (name)
+char pass[] = "wifi-password";       // Your network password (use for WPA, or use as key for WEP)
 int wifiStatus = WL_IDLE_STATUS;     // The Wi-Fi radio's status
 
 int ledState = LOW;
@@ -142,6 +133,19 @@ void setup()
   // Set built in LED pin to output mode
   pinMode(LED_BUILTIN, OUTPUT);
 
+  connectWiFi();
+
+  // Light the onboard LED to indicate WiFi connection ok
+  digitalWrite(LED_BUILTIN, HIGH);
+}
+
+
+/* ======================================================================
+ * Connect to WiFi
+ * https://github.com/arduino-libraries/WiFi/blob/master/docs/api.md
+*/
+void connectWiFi()
+{
   //
   // Flash the LED while connecting to WiFi
   //
@@ -176,6 +180,7 @@ void setup()
     digitalWrite(LED_BUILTIN, ledState);
     timerCount += 500;
 
+    // Wait 10 sec before next connection attempt
     if (timerCount >= 10000)
     {
       timerCount = 0;
@@ -188,10 +193,54 @@ void setup()
   #ifdef DEBUG
   Serial.println("Connected to the network"); 
   Serial.println("---------------------------------------");
+  
+  Serial.println("Board Information:");
+  // print your board's IP address:
+  IPAddress ip = WiFi.localIP();
+  Serial.print("IP Address: ");
+  Serial.println(ip);
+
+  // Print firmware version on the WiFi module
+  String fw = WiFi.firmwareVersion();
+  Serial.print("Firmware version installed: ");
+  Serial.println(fw);
+
+  // print your network's SSID:
+  Serial.println();
+  Serial.println("Network Information:");
+  Serial.print("SSID: ");
+  Serial.println(WiFi.SSID());
+
+  // print the received signal strength:
+  long rssi = WiFi.RSSI();
+  Serial.print("signal strength (RSSI):");
+  Serial.println(rssi);
+  Serial.println("---------------------------------------");
+  #endif
+}
+
+
+/* ======================================================================
+ * Check that we are still connected to WiFi otherwise try to reconnect
+*/
+void checkWiFiStatus()
+{
+  wifiStatus = WiFi.status();
+
+  #ifdef DEBUG
+  Serial.print("WiFi status:");
+  Serial.println(wifiStatus);
+  Serial.print("WiFi client status:");
+  Serial.println(client.status());
   #endif
 
-  // Light the onboard LED to indicate WiFi connection ok
-  digitalWrite(LED_BUILTIN, HIGH);
+  if (wifiStatus != WL_CONNECTED)
+  {
+    #ifdef DEBUG
+      Serial.println("Not connected. Trying to connect...");
+    #endif
+    connectWiFi();
+  }
 }
 
 
@@ -218,6 +267,7 @@ void getValue(enum Field id, char buff[])
   switch (id)
   {
     case ENERGY_DELIVERED:
+    case POWER_DEBUG:
     {
       digit1 = '1';
       digit2 = '8';
@@ -328,6 +378,10 @@ void sendValuesToServer(enum Field fields[], unsigned short numberOfFields)
       strcpy(deviceId, "269\0");
       break;
 
+      case POWER_DEBUG:
+      strcpy(deviceId, "283\0");
+      break;
+
       default:
       // Error
       return;
@@ -347,7 +401,7 @@ void sendValuesToServer(enum Field fields[], unsigned short numberOfFields)
     Serial.println(url);
     #endif
 
-    if (client.connect("my-domoticz-adress.com", 8080)) 
+    if (client.connect("192.168.1.2", 8181))
     {
       #ifdef DEBUG
       Serial.println("Connected to server");
@@ -355,12 +409,13 @@ void sendValuesToServer(enum Field fields[], unsigned short numberOfFields)
       // Make a HTTP request:
       //client.println("GET /json.htm?type=command&param=udevice&idx=265&nvalue=0&svalue=000226 HTTP/1.1");
       client.println(url);
-      client.println("Host: my-domoticz-adress.com");
+      client.println("Host: 192.168.1.2");
       client.println("Authorization: Basic dXNlcm5hbWU6cGFzc3dvcmQ="); // BASE64 encoding of Domoticz login "username:password"
       client.println("Connection: close");
       client.println();
       #ifdef DEBUG
       Serial.println("Request sent");
+      Serial.println("-------");
       #endif
     }
     else
@@ -368,6 +423,8 @@ void sendValuesToServer(enum Field fields[], unsigned short numberOfFields)
       #ifdef DEBUG
       Serial.println("Connection failed");
       #endif
+
+      checkWiFiStatus();
     }
   }
 }
@@ -473,15 +530,24 @@ void processData()
       #endif
 
       // Select the Fields we wanna send
+
+      // Test send
+      #ifdef DEBUG_SEND
+
+      enum Field fields[] = { POWER_DEBUG };
+      sendValuesToServer(fields, 1); // 1 = number of fields
+
+      #else
+
+      // Production send
       enum Field fields[] = { POWER_DELIVERED, POWER_RETURNED, ENERGY_DELIVERED, ENERGY_RETURNED };
       sendValuesToServer(fields, 4); // 4 = number of fields
 
-      #ifdef DEBUG
-      Serial.println("-------");
       #endif
 
       numberOfBytesRead = 0;
       numberOfCrcBytesRead = 0;
+
       setState(WAITING);
     }
 }
@@ -491,7 +557,7 @@ void processData()
 */
 void loop() 
 {
-  // Check for incoming byte(s) on Serial1
+  // Check for incoming byte on Serial1 (one byte at a time)
   if (Serial1.available())
   {
     readData();
